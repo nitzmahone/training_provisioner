@@ -12,7 +12,6 @@
         ami_id: ami-81d092b1 # centos 6.6 us-west-2
         size: t2.micro
         os_type: linux
-    aws_key_name: mdavis-test-west
     aws_region: us-west-2
     vpc_subnet_id: subnet-9fcbe4d9 # us-west-2 default VPC subnet
     admin_password: changeMe123! # the hash for this is hardcoded below because MacOS. If you change this, don't forget to update the hash...
@@ -155,9 +154,6 @@
       timeout: 120
     with_items: instances.results 
     when: item.tagged_instances[0].image_id == instance_types['windows'].ami_id
-
-  - name: calculate passwd hash
-    shell: python 
 
 - hosts: managed_hosts
   gather_facts: yes
