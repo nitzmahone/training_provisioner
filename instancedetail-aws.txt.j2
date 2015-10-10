@@ -1,0 +1,9 @@
+{{ item }}
+user: centos
+password: changeme123
+
+{% for grouper, list in instances.results|groupby('item') if grouper[0] == item %}
+  {% for vm in list %}
+{{ vm.tagged_instances[0].tags.Name }} : {{ vm.tagged_instances[0].public_ip }}
+  {% endfor %}
+{% endfor %}

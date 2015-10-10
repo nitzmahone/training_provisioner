@@ -1,0 +1,191 @@
+---
+- hosts: localhost
+  gather_facts: no
+  vars:
+    instance_types:
+      windows:
+        ami_id: ami-c3b3b1f3 #2012r2 us-west-2
+        size: t2.micro
+        user_data: "{{ lookup('template', 'winuserdata.txt.j2') }}" # template the password in at runtime
+        os_type: windows
+      centos6:
+        ami_id: ami-81d092b1 # centos 6.6 us-west-2
+        size: t2.micro
+        os_type: linux
+    aws_key_name: mdavis-test-west
+    aws_region: us-west-2
+    vpc_subnet_id: subnet-9fcbe4d9 # us-west-2 default VPC subnet
+    admin_password: changeMe123! # the hash for this is hardcoded below because MacOS. If you change this, don't forget to update the hash...
+
+    users:
+    - mdavis
+    - somebody_else
+
+    types:
+    - name: control
+      type: centos6
+    - name: node1
+      type: centos6
+    - name: node2
+      type: centos6
+    # - name: win-node1
+    #   type: windows
+  tasks:
+  - name: ensure required vars are set
+    assert:
+      that:
+      - name_prefix | default('') | length > 0
+
+  - name: ensure security group
+    local_action: ec2_group
+    args:
+      name: ssh_ping_http_winrm_rdp
+      description: lightbulb training group
+      region: '{{ aws_region }}'
+      rules:
+        - proto: tcp
+          from_port: 80
+          to_port: 80
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          from_port: 22
+          to_port: 22
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          from_port: 5986
+          to_port: 5986
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          from_port: 3389
+          to_port: 3389
+          cidr_ip: 0.0.0.0/0
+        - proto: icmp
+          from_port: -1
+          to_port: -1
+          cidr_ip: 0.0.0.0/0
+      rules_egress:
+        - proto: all
+          type: all
+          cidr_ip: 0.0.0.0/0
+
+  - name: setup instances (async)
+    local_action: ec2
+    args:
+      assign_public_ip: yes
+      image: '{{ instance_types[item.1.type].ami_id }}'
+      key_name: '{{ aws_key_name }}'
+      region: '{{aws_region}}'
+      exact_count: 1
+      count_tag:
+        Name: "{{ name_prefix }}-{{ item.0 }}-{{ item.1.name }}"
+      instance_tags:
+        Name: "{{ name_prefix }}-{{ item.0 }}-{{ item.1.name }}"
+      instance_type: "{{ instance_types[item.1.type].size }}"
+      user_data: '{{ instance_types[item.1.type].user_data | default(omit) }}'
+      group: ssh_ping_http_winrm_rdp
+      wait: no
+      vpc_subnet_id: '{{vpc_subnet_id}}'
+    with_nested:
+      - users
+      - types 
+    register: async_instances
+
+  - name: wait a bit for async-started instances 
+    pause: seconds=90
+    when: async_instances | changed
+
+  - name: setup instances (wait)
+    local_action: ec2
+    args:
+      assign_public_ip: yes
+      image: '{{ instance_types[item.1.type].ami_id }}'
+      key_name: '{{ aws_key_name }}'
+      region: '{{aws_region}}'
+      exact_count: 1
+      count_tag:
+        Name: "{{ name_prefix }}-{{ item.0 }}-{{ item.1.name }}"
+      instance_tags:
+        Name: "{{ name_prefix }}-{{ item.0 }}-{{ item.1.name }}"
+      instance_type: "{{ instance_types[item.1.type].size }}"
+      user_data: '{{ instance_types[item.1.type].user_data | default(omit) }}'
+      group: ssh_ping_http_winrm_rdp
+      wait: yes
+      vpc_subnet_id: '{{vpc_subnet_id}}'
+      user_data: 
+    with_nested:
+      - users
+      - types 
+    register: instances
+
+  - debug: var=instances
+
+  - name: dump instance details text files
+    local_action: template 
+    args:
+      src: instancedetail-aws.txt.j2 
+      dest: ./{{ item }}-instances.txt
+    with_items: users 
+
+  - name: add hosts
+    add_host: name={{ item.tagged_instances[0].tags.Name }}
+              ansible_ssh_host={{ item.tagged_instances[0].public_ip }}
+              ansible_ssh_user=root
+              groups=managed_hosts
+    with_items: instances.results
+    when: item.tagged_instances[0].image_id != instance_types['windows'].ami_id
+    register: add_host_output
+
+  - debug: var=add_host_output
+
+  - name: wait for instances to answer on SSH
+    local_action: wait_for
+    args: 
+      port: 22
+      host: '{{ item.tagged_instances[0].public_ip }}'
+      search_regex: OpenSSH
+      timeout: 120
+    with_items: instances.results 
+    when: item.tagged_instances[0].image_id != instance_types['windows'].ami_id
+
+  - name: wait for win instance startup
+    local_action: wait_for
+    args: 
+      port: 5986
+      host: '{{ item.tagged_instances[0].public_ip }}'
+      timeout: 120
+    with_items: instances.results 
+    when: item.tagged_instances[0].image_id == instance_types['windows'].ami_id
+
+  - name: calculate passwd hash
+    shell: python 
+
+- hosts: managed_hosts
+  gather_facts: yes
+  sudo: yes
+  tasks:
+  - name: enable password auth
+    lineinfile: 
+      line: PasswordAuthentication yes
+      regexp: ^PasswordAuthentication
+      dest: /etc/ssh/sshd_config
+    notify: restart sshd
+
+  - name: ensure users/passwords
+    user:
+      name: '{{ item }}'
+      # crypt() on MacOS is not interoperable; hardcoding password hash...
+      #password: "{{ 'changeme123'|password_hash('sha512') }}"
+      password: "$6$rounds=100000$W3Cs5AoklPdUV.Yg$hoRZfL/iVGGki9ZHVU2cXXOyb3WgyifTm09/hp5NhmFd0zvFpm3k5tDxJicOKsjS88ZfirsIyF9UAQnvEizPx/"
+    with_items:
+    - centos
+    - root
+
+  - name: ensure libselinux-python
+    yum: name=libselinux-python
+
+  - name: allow passwordless sudo for centos user
+    lineinfile: "dest=/etc/sudoers state=present line='centos ALL=(ALL) NOPASSWD: ALL'"
+
+  handlers:
+  - name: restart sshd
+    service: name=sshd state=restarted
