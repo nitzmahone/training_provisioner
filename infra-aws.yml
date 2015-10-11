@@ -34,6 +34,7 @@
     assert:
       that:
       - name_prefix | default('') | length > 0
+      - aws_key_name | default('') | length > 0
 
   - name: ensure security group
     local_action: ec2_group
